@@ -1,0 +1,4 @@
+node_modules/
+osrm-data/
+.env
+.DS_Store

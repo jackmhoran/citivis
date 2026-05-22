@@ -1,0 +1,2 @@
+ALTER TABLE stations ADD COLUMN IF NOT EXISTS borough      TEXT;
+ALTER TABLE stations ADD COLUMN IF NOT EXISTS neighborhood TEXT;
