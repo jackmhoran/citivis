@@ -1428,6 +1428,7 @@
 
           const pad = 50, desktop = window.innerWidth >= 768;
           const drawerH = desktop ? 0 : panel.offsetHeight;
+          statsContent.scrollTop = 0;
           map.flyToBounds(
             L.latLngBounds([[+s.lat, +s.lng], [+e.lat, +e.lng]]),
             {
