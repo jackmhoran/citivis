@@ -396,34 +396,38 @@
         font-variant-numeric: tabular-nums;
       }
 
-      /* ── View all button ── */
-      .view-all-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 6px;
-        width: 100%;
-        padding: 14px 16px;
-        background: none;
-        border: none;
-        color: #566480;
-        font-size: 12px;
-        font-weight: 500;
-        letter-spacing: 0.04em;
-        cursor: pointer;
-        -webkit-tap-highlight-color: transparent;
-        touch-action: manipulation;
+      /* ── Skeleton blur loading ── */
+      .skel-blur {
+        filter: blur(5px);
+        user-select: none;
+        pointer-events: none;
+        opacity: 0.6;
+        animation: skel-pulse 3s ease-in-out infinite;
       }
-      .view-all-btn:active {
-        color: #eef2ff;
+      @keyframes skel-pulse {
+        0%, 100% { opacity: 0.55; }
+        50% { opacity: 0.65; }
       }
-      .chevron-dn {
-        display: inline-block;
-        width: 7px;
-        height: 7px;
-        border-right: 2px solid currentColor;
-        border-bottom: 2px solid currentColor;
-        transform: rotate(45deg) translateY(-2px);
+      .skel-progress {
+        height: 2px;
+        background: #111827;
+        overflow: hidden;
+        margin: 0 -16px 16px;
+        position: relative;
+        flex-shrink: 0;
+      }
+      .skel-progress::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        height: 100%;
+        width: 35%;
+        background: linear-gradient(90deg, transparent, #00d0ff88, #00d0ff, #00d0ff88, transparent);
+        animation: skel-sweep 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+      }
+      @keyframes skel-sweep {
+        0% { left: -35%; }
+        100% { left: 100%; }
       }
 
       /* ── Discover button ── */
@@ -882,7 +886,7 @@
         panelSub.textContent = sub;
         peekContent.style.display = "none";
         statsContent.style.display = "";
-        statsContent.innerHTML = '<div class="loading">Loading…</div>';
+        statsContent.innerHTML = renderSkeletonLeaderboard();
         statsContent.scrollTop = 0;
         btnBack.textContent = "⇄";
         btnBack.setAttribute("aria-label", "Reverse route");
@@ -990,26 +994,11 @@
       });
       btnBack.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (panel.classList.contains("expanded")) {
-          panel.className = "full";
-          btnBack.textContent = "⇄";
-          btnBack.setAttribute("aria-label", "Reverse route");
-          if (currentStats) renderLeaderboard(currentStats);
-        } else if (startId && endId) {
-          selectRoute(endId, startId);
-        }
+        if (startId && endId) selectRoute(endId, startId);
       });
       map.on("click", resetAll);
       document.addEventListener("keydown", (e) => {
-        if (e.key !== "Escape") return;
-        if (panel.classList.contains("expanded")) {
-          panel.className = "full";
-          btnBack.textContent = "⇄";
-          btnBack.setAttribute("aria-label", "Reverse route");
-          if (currentStats) renderLeaderboard(currentStats);
-        } else {
-          resetAll();
-        }
+        if (e.key === "Escape") resetAll();
       });
 
       // ── Load stations ──
@@ -1361,6 +1350,20 @@
           else m.setStyle(S.dim);
         });
 
+        // Begin panning immediately so map arrives by the time data loads
+        if (s && e) {
+          const pad = 50, desktop = window.innerWidth >= 768;
+          map.flyToBounds(
+            L.latLngBounds([[+s.lat, +s.lng], [+e.lat, +e.lng]]),
+            {
+              paddingTopLeft: [pad, 60],
+              paddingBottomRight: desktop ? [360 + pad, pad] : [pad, Math.round(window.innerHeight * 0.38)],
+              maxZoom: 15,
+              duration: 3.5,
+            },
+          );
+        }
+
         // Fetch route geometry and stats in parallel
         let coords, stats;
         try {
@@ -1386,26 +1389,6 @@
         currentStats = stats;
         if (coords) drawAnimatedRoute(coords);
         renderLeaderboard(stats);
-
-        // Fit after renderLeaderboard so panel has its true height
-        requestAnimationFrame(() => {
-          if (startId !== sId || endId !== eId || !s || !e) return;
-          const pad = 50;
-          const desktop = window.innerWidth >= 768;
-          map.fitBounds(
-            L.latLngBounds([
-              [+s.lat, +s.lng],
-              [+e.lat, +e.lng],
-            ]),
-            {
-              paddingTopLeft: [pad, pad],
-              paddingBottomRight: desktop
-                ? [panel.offsetWidth + pad, pad]
-                : [pad, panel.offsetHeight + pad],
-              maxZoom: 15,
-            },
-          );
-        });
       }
 
       // ── Distribution histogram ──
@@ -1482,24 +1465,55 @@
 </div>`;
       }
 
-      // ── All rides (expanded view) ──
-      async function loadAllRides() {
-        statsContent.innerHTML = '<div class="loading">Loading…</div>';
-        const { rides } = await fetch(
-          `/api/stations/${encodeURIComponent(startId)}/${encodeURIComponent(endId)}/rides`,
-        ).then((r) => r.json());
-        if (phase !== "route") return;
-        const dist = currentStats?.distanceMeters ?? routeDistMeters(startId, endId);
-        let html = `<div class="section-label">All ${rides.length.toLocaleString()} rides · fastest to slowest</div>`;
-        for (let i = 0; i < rides.length; i++) {
-          const r = rides[i];
+      // ── Skeleton loading state ──
+      function renderSkeletonHistogram() {
+        const heights = [28, 55, 82, 96, 90, 70, 48, 30, 17, 9];
+        const bars = heights.map((h, i) => {
+          const color = histColor(i / (heights.length - 1));
+          return `<div class="hist-bar-wrap"><div class="hist-bar" style="height:${h}%;background:${color}"></div></div>`;
+        }).join('');
+        return `<div class="hist-wrap skel-blur">
+  <div class="hist-chart">
+    <div class="hist-yaxis"><span>125</span><span>0</span></div>
+    <div style="flex:1;min-width:0">
+      <div class="hist-bars">${bars}</div>
+      <div class="hist-axis"><span>3:00</span><span>4:30</span><span>7:00+</span></div>
+    </div>
+  </div>
+</div>`;
+      }
+
+      function renderSkeletonLeaderboard() {
+        const medals = ['🥇', '🥈', '🥉', '4', '5'];
+        const fakeTimes = ['3:42', '3:51', '4:03', '4:17', '4:29'];
+        const fakeDates = ['Jan 15, 2024', 'Mar 8, 2024', 'Nov 22, 2023', 'Feb 1, 2024', 'Apr 14, 2024'];
+        let html = `<div class="skel-progress"></div><div class="stat-highlights">
+  <div class="stat-pill">
+    <div class="label skel-blur">Total trips</div>
+    <div class="value skel-blur">1,247</div>
+  </div>
+  <div class="stat-pill">
+    <div class="label skel-blur">Median</div>
+    <div class="value skel-blur">4:18</div>
+    <div class="pill-range"><div class="pill-range-iqr" style="left:20%;right:25%"></div><div class="pill-range-p50" style="left:48%"></div></div>
+  </div>
+  <div class="stat-pill">
+    <div class="label skel-blur">Members</div>
+    <div class="value skel-blur">73%</div>
+    <div class="pill-sub skel-blur">27% casual</div>
+  </div>
+</div>
+<div class="section-label skel-blur">Frequency of Trip Length</div>
+${renderSkeletonHistogram()}
+<div class="section-label skel-blur">Leaderboard</div>`;
+        for (let i = 0; i < 5; i++) {
           html += `<div class="leaderboard-row">
-            <span class="row-rank" style="font-size:12px;color:#7d8590">${i + 1}</span>
-            <span class="row-time">${fmtTime(r.duration_seconds)}${speedLabel(dist, r.duration_seconds)}</span>
-            <span class="row-date">${r.started_at ? fmtDate(r.started_at) : "—"}</span>
-          </div>`;
+  <span class="row-rank">${medals[i]}</span>
+  <span class="row-time skel-blur">${fakeTimes[i]} <span class="row-speed">· 2.8 mph</span></span>
+  <span class="row-date skel-blur">${fakeDates[i]}</span>
+</div>`;
         }
-        statsContent.innerHTML = html;
+        return html;
       }
 
       // ── Leaderboard ──
@@ -1567,19 +1581,7 @@
           }
         }
 
-        if (stats.count > 5) {
-          html += `<button class="view-all-btn" id="btn-view-all">View all <span class="chevron-dn"></span></button>`;
-        }
         statsContent.innerHTML = html;
-        statsContent
-          .querySelector("#btn-view-all")
-          ?.addEventListener("click", (e) => {
-            e.stopPropagation();
-            panel.className = "expanded";
-            btnBack.textContent = "←";
-            btnBack.setAttribute("aria-label", "Back to summary");
-            loadAllRides();
-          });
       }
 
       // ── Discover ──
