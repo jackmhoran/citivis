@@ -160,6 +160,7 @@
         flex: 1;
         -webkit-overflow-scrolling: touch;
         padding: 0 16px 32px;
+        overscroll-behavior: contain;
       }
 
       .stat-highlights {
@@ -1064,6 +1065,10 @@
       document.addEventListener("keydown", (e) => {
         if (e.key === "Escape") resetAll();
       });
+
+      // Prevent touch sequences that start in the panel from reaching the map
+      panel.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
+      panel.addEventListener("touchmove", (e) => e.stopPropagation(), { passive: true });
 
       // ── Load stations ──
       const { stations } = await (await fetch("/api/stations")).json();
