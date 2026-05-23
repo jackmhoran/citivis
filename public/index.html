@@ -1045,7 +1045,7 @@
         history.replaceState(null, "", location.pathname);
       }
 
-      map.on("zoom", () => {
+      map.on("zoomend", () => {
         if (phase === "idle") {
           const r = baseRadius();
           stationMarkers.forEach((m) => m.setStyle({ radius: r }));
