@@ -1422,15 +1422,12 @@
         return 100;
       }
 
-      function buildHistogram(stats, numBins = 20) {
-        const min = stats.top10fastest?.[0]?.duration_seconds;
+      function buildHistogram(stats, numBins = 10) {
+        const min = stats.top5fastest?.[0]?.duration_seconds;
         const max = stats.percentiles?.p90;
         if (min == null || max == null || max <= min) return [];
         const cdf = [[min, 0]];
-        for (const p of [
-          5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90,
-          95, 100,
-        ]) {
+        for (const p of [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]) {
           const v = stats.percentiles[`p${p}`];
           if (v != null) cdf.push([v, p]);
         }
@@ -1467,7 +1464,7 @@
             return `<div class="hist-bar-wrap"><div class="hist-bar-tip">${label}</div><div class="hist-bar" style="height:${h}%;background:${color}"></div></div>`;
           })
           .join("");
-        const min = stats.top10fastest?.[0]?.duration_seconds;
+        const min = stats.top5fastest?.[0]?.duration_seconds;
         const p50 = stats.percentiles?.p50;
         const p90 = stats.percentiles?.p90;
         return `<div class="hist-wrap">
@@ -1507,15 +1504,14 @@
 
       // ── Leaderboard ──
       function renderLeaderboard(stats) {
-        const fastest = (stats.top10fastest ?? []).slice(0, 5);
-        const slowest = stats.top10slowest?.[0];
+        const fastest = (stats.top5fastest ?? []).slice(0, 5);
         const median = stats.percentiles?.p50;
         const medals = ["🥇", "🥈", "🥉"];
 
-        // Range bar for median pill (mini box plot: p10→p90 track, p25–p75 IQR, p50 tick)
+        // Range bar for median pill (mini box plot: p10→p90 track, p20–p80 IQR, p50 tick)
         const p10 = stats.percentiles?.p10,
-          p25 = stats.percentiles?.p25;
-        const p75 = stats.percentiles?.p75,
+          p20 = stats.percentiles?.p20;
+        const p80 = stats.percentiles?.p80,
           p90 = stats.percentiles?.p90;
         const hasRange = p10 != null && p90 != null && p90 > p10;
         const pct = hasRange
@@ -1526,9 +1522,9 @@
               ).toFixed(1)
           : null;
         const rangeBar =
-          hasRange && median != null && p25 != null && p75 != null
+          hasRange && median != null && p20 != null && p80 != null
             ? `<div class="pill-range">
-               <div class="pill-range-iqr" style="left:${pct(p25)}%;right:${(100 - +pct(p75)).toFixed(1)}%"></div>
+               <div class="pill-range-iqr" style="left:${pct(p20)}%;right:${(100 - +pct(p80)).toFixed(1)}%"></div>
                <div class="pill-range-p50" style="left:${pct(median)}%"></div>
              </div>`
             : "";

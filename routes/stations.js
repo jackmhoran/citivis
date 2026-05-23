@@ -1,10 +1,8 @@
 import { Hono } from 'hono';
 import pool from '../lib/db.js';
-import { getAllStations, getStationDestinations, getClosestStations, getRandomStation, getMaxDate, getRouteStats, getRouteCompare, getPopularRoutes, getAllRouteRides, getExploreRoutes, getExploreMeta } from '../queries/stations.js';
+import { getAllStations, getStationDestinations, getClosestStations, getRandomStation, getRouteStats, getRouteCompare, getPopularRoutes, getAllRouteRides, getExploreRoutes, getExploreMeta } from '../queries/stations.js';
 
 const router = new Hono();
-
-const VALID_TIMEFRAMES = new Set(['alltime', 'year', 'month', 'day']);
 
 router.get('/', async (c) => {
   const stations = await getAllStations(pool);
@@ -73,20 +71,12 @@ router.get('/:startId/:endId/rides', async (c) => {
 
 router.get('/:startId/:endId/stats', async (c) => {
   const { startId, endId } = c.req.param();
-  const timeframe = c.req.query('timeframe') ?? 'alltime';
-
-  if (!VALID_TIMEFRAMES.has(timeframe)) {
-    return c.json({ error: `Invalid timeframe. Use: ${[...VALID_TIMEFRAMES].join(', ')}` }, 400);
-  }
-
-  const dateRef = timeframe === 'alltime' ? null : await getMaxDate(pool, startId, endId);
-  const result = await getRouteStats(pool, startId, endId, dateRef, timeframe);
+  const result = await getRouteStats(pool, startId, endId);
   return c.json(result);
 });
 
 router.get('/:startId/:endId/compare', async (c) => {
   const { startId, endId } = c.req.param();
-  const timeframe = c.req.query('timeframe') ?? 'alltime';
   const durationStr = c.req.query('duration');
 
   if (!durationStr) return c.json({ error: 'duration query param is required' }, 400);
@@ -95,12 +85,7 @@ router.get('/:startId/:endId/compare', async (c) => {
     return c.json({ error: 'duration must be a positive integer (seconds)' }, 400);
   }
 
-  if (!VALID_TIMEFRAMES.has(timeframe)) {
-    return c.json({ error: `Invalid timeframe. Use: ${[...VALID_TIMEFRAMES].join(', ')}` }, 400);
-  }
-
-  const dateRef = timeframe === 'alltime' ? null : await getMaxDate(pool, startId, endId);
-  const result = await getRouteCompare(pool, startId, endId, duration, dateRef, timeframe);
+  const result = await getRouteCompare(pool, startId, endId, duration);
   return c.json(result);
 });
 

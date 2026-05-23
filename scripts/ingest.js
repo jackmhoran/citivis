@@ -6,6 +6,7 @@ import { Pool } from 'pg';
 import https from 'https';
 import { Writable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
+import { maintainRouteStats } from '../lib/maintain-route-stats.js';
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://localhost/citivis';
 const S3_BASE = 'https://s3.amazonaws.com/tripdata';
@@ -169,7 +170,7 @@ function parseRow(row) {
   return {
     ride_id:            String(rideId),
     started_at:         startedAt.toISOString(),
-    duration_seconds:   Math.round((endedAt - startedAt) / 1000),
+    duration_seconds:   Math.min(32767, Math.round((endedAt - startedAt) / 1000)),
     // New format uses camelCase; legacy format uses lowercase with spaces
     start_station_id:   row['start_station_id']   || row['Start Station ID']        || row['start station id']        || null,
     start_station_name: row['start_station_name'] || row['Start Station Name']      || row['start station name']      || null,
@@ -179,7 +180,7 @@ function parseRow(row) {
     end_station_name:   row['end_station_name']    || row['End Station Name']        || row['end station name']        || null,
     end_lat:            row['end_lat']             || row['End Station Latitude']    || row['end station latitude']    || null,
     end_lng:            row['end_lng']             || row['End Station Longitude']   || row['end station longitude']   || null,
-    member_casual:      row['member_casual']       || row['User Type']               || row['usertype']                || null,
+    is_member:          (() => { const v = row['member_casual'] || row['User Type'] || row['usertype']; return v ? ['member','Subscriber'].includes(v) : null; })(),
   };
 }
 
@@ -194,7 +195,7 @@ async function upsertStations(client, stationMap) {
   }
 }
 
-async function flushBatch(client, batch) {
+async function flushBatch(client, batch, affectedPairs) {
   const stationMap = new Map();
   for (const r of batch) {
     if (r.start_station_id && !stationMap.has(r.start_station_id)) {
@@ -212,22 +213,31 @@ async function flushBatch(client, batch) {
   }
   await upsertStations(client, stationMap);
 
+  const valid = batch.filter(r =>
+    r.start_station_id &&
+    r.end_station_id &&
+    r.start_station_id !== r.end_station_id &&
+    r.duration_seconds > 0
+  );
+  for (const r of valid) affectedPairs.add(`${r.start_station_id}|${r.end_station_id}`);
+  if (!valid.length) return;
+
   const placeholders = [];
   const params = [];
   let i = 1;
-  for (const r of batch) {
+  for (const r of valid) {
     placeholders.push(`($${i++},$${i++},$${i++},$${i++},$${i++},$${i++})`);
     params.push(r.ride_id, r.started_at, r.duration_seconds,
-                r.start_station_id || null, r.end_station_id || null, r.member_casual || null);
+                r.start_station_id, r.end_station_id, r.is_member ?? null);
   }
   await client.query(
-    `INSERT INTO trips (ride_id, started_at, duration_seconds, start_station_id, end_station_id, member_casual)
+    `INSERT INTO trips (ride_id, started_at, duration_seconds, start_station_id, end_station_id, is_member)
      VALUES ${placeholders.join(',')} ON CONFLICT (ride_id) DO NOTHING`,
     params
   );
 }
 
-async function processCsvStream(csvStream, client, tripCountRef) {
+async function processCsvStream(csvStream, client, tripCountRef, affectedPairs) {
   let batch = [];
   await new Promise((resolve, reject) => {
     const writer = new Writable({
@@ -238,7 +248,7 @@ async function processCsvStream(csvStream, client, tripCountRef) {
         if (batch.length < BATCH_SIZE) return cb();
 
         const toFlush = batch.splice(0, BATCH_SIZE);
-        flushBatch(client, toFlush)
+        flushBatch(client, toFlush, affectedPairs)
           .then(() => {
             tripCountRef.count += toFlush.length;
             if (tripCountRef.count % 50000 === 0)
@@ -249,7 +259,7 @@ async function processCsvStream(csvStream, client, tripCountRef) {
       },
       final(cb) {
         if (batch.length === 0) return cb();
-        flushBatch(client, batch)
+        flushBatch(client, batch, affectedPairs)
           .then(() => { tripCountRef.count += batch.length; batch = []; cb(); })
           .catch(cb);
       },
@@ -277,6 +287,7 @@ async function ingestAnnualZip(key) {
   const httpStream = await fetchStream(url);
   const client = await pool.connect();
   const tripCountRef = { count: 0 };
+  const affectedPairs = new Set();
 
   try {
     await client.query('BEGIN');
@@ -291,7 +302,7 @@ async function ingestAnnualZip(key) {
       if (entry.path.match(/\.csv$/i)) {
         console.log(`  Processing ${entry.path}…`);
         const csvStream = entry.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
-        await processCsvStream(csvStream, client, tripCountRef);
+        await processCsvStream(csvStream, client, tripCountRef, affectedPairs);
       } else if (entry.path.match(/\.zip$/i)) {
         // Annual NYC zips contain nested monthly zips
         const innerZip = entry.pipe(unzipper.Parse({ forceStream: true }));
@@ -299,7 +310,7 @@ async function ingestAnnualZip(key) {
           if (!inner.path.match(/\.csv$/i)) { inner.autodrain(); continue; }
           console.log(`  Processing ${inner.path}…`);
           const csvStream = inner.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
-          await processCsvStream(csvStream, client, tripCountRef);
+          await processCsvStream(csvStream, client, tripCountRef, affectedPairs);
         }
       } else {
         entry.autodrain();
@@ -316,6 +327,8 @@ async function ingestAnnualZip(key) {
 
     await client.query('COMMIT');
     console.log(`\n${year}: ingested ${tripCountRef.count} classic bike trips.`);
+    console.log(`Updating route_stats and trimming trips for ${affectedPairs.size} affected pairs…`);
+    await maintainRouteStats(pool, affectedPairs);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -342,6 +355,7 @@ async function ingestPeriod(period, key = null) {
 
   const client = await pool.connect();
   const tripCountRef = { count: 0 };
+  const affectedPairs = new Set();
 
   try {
     await client.query('BEGIN');
@@ -351,7 +365,7 @@ async function ingestPeriod(period, key = null) {
       if (!entry.path.match(/\.csv$/i)) { entry.autodrain(); continue; }
       console.log(`  Processing ${entry.path}…`);
       const csvStream = entry.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
-      await processCsvStream(csvStream, client, tripCountRef);
+      await processCsvStream(csvStream, client, tripCountRef, affectedPairs);
     }
 
     await client.query(
@@ -360,6 +374,8 @@ async function ingestPeriod(period, key = null) {
     );
     await client.query('COMMIT');
     console.log(`\n${period}: ingested ${tripCountRef.count} classic bike trips.`);
+    console.log(`Updating route_stats and trimming trips for ${affectedPairs.size} affected pairs…`);
+    await maintainRouteStats(pool, affectedPairs);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

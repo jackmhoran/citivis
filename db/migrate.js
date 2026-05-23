@@ -8,8 +8,10 @@ import { Client } from 'pg';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://localhost/citivis';
 
+const ssl = process.env.DATABASE_URL ? { rejectUnauthorized: false } : false;
+
 async function migrate() {
-  const client = new Client({ connectionString: DATABASE_URL });
+  const client = new Client({ connectionString: DATABASE_URL, ssl });
   await client.connect();
 
   const migrationsDir = join(__dirname, 'migrations');

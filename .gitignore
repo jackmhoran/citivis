@@ -1,4 +1,7 @@
 node_modules/
 osrm-data/
+certs/
 .env
 .DS_Store
+
+citivis.dump

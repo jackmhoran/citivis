@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { getClosestStations, getRandomStation, getMaxDate, getRouteStats, getRouteCompare, getExploreRoutes, getExploreMeta } from '../../queries/stations.js';
+import { getClosestStations, getRandomStation, getRouteStats, getRouteCompare, getExploreRoutes, getExploreMeta } from '../../queries/stations.js';
 
 const mockPool = { query: vi.fn() };
 
@@ -7,19 +7,20 @@ beforeEach(() => mockPool.query.mockReset());
 
 const START = 'station-A';
 const END   = 'station-B';
-const DATE_REF = new Date('2024-01-31T23:59:59Z');
 
 const FAST_ROW    = { ride_id: 'fast-1', duration_seconds: 60,   started_at: '2024-01-15T08:30:00Z' };
 const SLOW_ROW    = { ride_id: 'slow-1', duration_seconds: 3600, started_at: '2024-01-20T17:00:00Z' };
-const PCT_ROW     = { p5:100,p10:120,p15:140,p20:160,p25:180,p30:200,p35:220,p40:240,p45:260,p50:280,p55:300,p60:320,p65:340,p70:360,p75:380,p80:400,p85:420,p90:440,p95:460,p100:600 };
+const NEAR_ROW    = { ride_id: 'near-1', duration_seconds: 305 };
+const PCT_ROW     = { p10:120,p20:160,p30:200,p40:240,p50:280,p60:320,p70:360,p80:400,p90:440,p100:600 };
 const START_STATION = { id: START, name: 'Start Ave & 1 St', lat: 40.748, lng: -73.985 };
 const END_STATION   = { id: END,   name: 'End Blvd & 2 St',  lat: 40.750, lng: -73.990 };
+const STATS_ROW     = { trip_count: 100, member_pct: 75, distance_meters: 1200, min_seconds: 60, ...PCT_ROW };
 
 // ─── getClosestStations ───────────────────────────────────────────────────────
 
 describe('getClosestStations', () => {
   const NEARBY = [
-    { id: 's1', name: 'Near Station',  lat: 40.748, lng: -73.985, distance_meters: 42 },
+    { id: 's1', name: 'Near Station',    lat: 40.748, lng: -73.985, distance_meters: 42 },
     { id: 's2', name: 'Further Station', lat: 40.750, lng: -73.990, distance_meters: 300 },
   ];
 
@@ -65,176 +66,127 @@ describe('getRandomStation', () => {
   });
 });
 
-// ─── getMaxDate ───────────────────────────────────────────────────────────────
-
-describe('getMaxDate', () => {
-  test('returns max date from query result', async () => {
-    mockPool.query.mockResolvedValueOnce({ rows: [{ max_date: DATE_REF }] });
-    const result = await getMaxDate(mockPool, START, END);
-    expect(result).toBe(DATE_REF);
-    expect(mockPool.query).toHaveBeenCalledWith(
-      expect.stringContaining('MAX(started_at)'),
-      [START, END]
-    );
-  });
-
-  test('returns null when no trips exist for route', async () => {
-    mockPool.query.mockResolvedValueOnce({ rows: [{ max_date: null }] });
-    const result = await getMaxDate(mockPool, START, END);
-    expect(result).toBeNull();
-  });
-});
-
 // ─── getRouteStats ────────────────────────────────────────────────────────────
+// Query order in Promise.all: [route_stats, fastest, slowest, startStation, endStation]
 
-function mockStats(countVal = 100) {
+function mockStats(statsRow = STATS_ROW) {
   mockPool.query
-    .mockResolvedValueOnce({ rows: [{ count: countVal }] })   // count
-    .mockResolvedValueOnce({ rows: [FAST_ROW] })              // top10fastest
-    .mockResolvedValueOnce({ rows: [SLOW_ROW] })              // top10slowest
-    .mockResolvedValueOnce({ rows: [PCT_ROW] })               // percentiles
-    .mockResolvedValueOnce({ rows: [START_STATION] })         // startStation
-    .mockResolvedValueOnce({ rows: [END_STATION] });          // endStation
+    .mockResolvedValueOnce({ rows: [statsRow] })       // route_stats
+    .mockResolvedValueOnce({ rows: [FAST_ROW] })       // top5fastest
+    .mockResolvedValueOnce({ rows: [START_STATION] })  // startStation
+    .mockResolvedValueOnce({ rows: [END_STATION] });   // endStation
 }
 
 describe('getRouteStats', () => {
-  test('alltime — returns correct structure and values', async () => {
+  test('returns correct structure and values', async () => {
     mockStats();
-    const result = await getRouteStats(mockPool, START, END, null, 'alltime');
+    const result = await getRouteStats(mockPool, START, END);
 
     expect(result.startStation).toEqual(START_STATION);
     expect(result.endStation).toEqual(END_STATION);
     expect(result.count).toBe(100);
-    expect(result.top10fastest).toEqual([FAST_ROW]);
-    expect(result.top10slowest).toEqual([SLOW_ROW]);
-    expect(result.percentiles.p5).toBe(100);
+    expect(result.memberPct).toBe(75);
+    expect(result.distanceMeters).toBe(1200);
+    expect(result.top5fastest).toEqual([FAST_ROW]);
+    expect(result.percentiles.p10).toBe(120);
     expect(result.percentiles.p50).toBe(280);
     expect(result.percentiles.p100).toBe(600);
   });
 
-  test('alltime — passes only [startId, endId] params to trip queries', async () => {
+  test('trip queries use [startId, endId] params', async () => {
     mockStats();
-    await getRouteStats(mockPool, START, END, null, 'alltime');
-    // first 4 calls are trip queries; last 2 are single-id station lookups
-    for (const [, params] of mockPool.query.mock.calls.slice(0, 4)) {
+    await getRouteStats(mockPool, START, END);
+    const calls = mockPool.query.mock.calls;
+    // route_stats + fastest both get both IDs
+    for (const [, params] of calls.slice(0, 2)) {
       expect(params).toEqual([START, END]);
     }
+    // station lookups get single IDs
+    expect(calls[2][1]).toEqual([START]);
+    expect(calls[3][1]).toEqual([END]);
   });
 
-  test('year — appends dateRef as $3 to trip queries', async () => {
+  test('route_stats query targets route_stats table', async () => {
     mockStats();
-    await getRouteStats(mockPool, START, END, DATE_REF, 'year');
-    for (const [sql, params] of mockPool.query.mock.calls.slice(0, 4)) {
-      expect(params).toEqual([START, END, DATE_REF]);
-      expect(sql).toContain("DATE_TRUNC('year'");
-    }
-  });
-
-  test('month — uses month truncation', async () => {
-    mockStats();
-    await getRouteStats(mockPool, START, END, DATE_REF, 'month');
+    await getRouteStats(mockPool, START, END);
     const [sql] = mockPool.query.mock.calls[0];
-    expect(sql).toContain("DATE_TRUNC('month'");
-  });
-
-  test('day — uses day truncation', async () => {
-    mockStats();
-    await getRouteStats(mockPool, START, END, DATE_REF, 'day');
-    const [sql] = mockPool.query.mock.calls[0];
-    expect(sql).toContain("DATE_TRUNC('day'");
+    expect(sql).toContain('route_stats');
+    expect(sql).toContain('start_station_id = $1');
   });
 
   test('zero rows — returns 0 count, empty arrays, null percentiles', async () => {
     mockPool.query
-      .mockResolvedValueOnce({ rows: [{ count: 0 }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{}] })
+      .mockResolvedValueOnce({ rows: [] })              // route_stats — no match
+      .mockResolvedValueOnce({ rows: [] })              // fastest
       .mockResolvedValueOnce({ rows: [START_STATION] })
       .mockResolvedValueOnce({ rows: [END_STATION] });
 
-    const result = await getRouteStats(mockPool, START, END, null, 'alltime');
+    const result = await getRouteStats(mockPool, START, END);
 
     expect(result.count).toBe(0);
-    expect(result.top10fastest).toEqual([]);
-    expect(result.top10slowest).toEqual([]);
-    expect(result.percentiles.p5).toBeNull();
+    expect(result.top5fastest).toEqual([]);
+    expect(result.percentiles.p10).toBeNull();
     expect(result.percentiles.p100).toBeNull();
-  });
-
-  test('throws on invalid timeframe', async () => {
-    await expect(getRouteStats(mockPool, START, END, null, 'invalid')).rejects.toThrow('Invalid timeframe');
   });
 });
 
 // ─── getRouteCompare ──────────────────────────────────────────────────────────
+// Query order in Promise.all: [route_stats, fastest, slowest, nearest]
 
 const DURATION = 300;
-const NEAR_ROW = { ride_id: 'near-1', duration_seconds: 305 };
+const COMPARE_STATS = { trip_count: 50, min_seconds: 60, ...PCT_ROW };
 
-function mockCompare(countVal = 50) {
+function mockCompare(statsRow = COMPARE_STATS) {
   mockPool.query
-    .mockResolvedValueOnce({ rows: [{ count: countVal }] })           // count
-    .mockResolvedValueOnce({ rows: [{ percentile_rank: '42.5' }] })   // percentileRank
-    .mockResolvedValueOnce({ rows: [FAST_ROW] })                       // top5fastest
-    .mockResolvedValueOnce({ rows: [SLOW_ROW] })                       // top5slowest
-    .mockResolvedValueOnce({ rows: [NEAR_ROW] });                      // nearest10
+    .mockResolvedValueOnce({ rows: [statsRow] })  // route_stats
+    .mockResolvedValueOnce({ rows: [FAST_ROW] })  // top5fastest
+    .mockResolvedValueOnce({ rows: [NEAR_ROW] }); // nearest5
 }
 
 describe('getRouteCompare', () => {
-  test('alltime — returns correct structure and values', async () => {
+  test('returns correct structure', async () => {
     mockCompare();
-    const result = await getRouteCompare(mockPool, START, END, DURATION, null, 'alltime');
+    const result = await getRouteCompare(mockPool, START, END, DURATION);
 
     expect(result.count).toBe(50);
-    expect(result.percentileRank).toBe(42.5);
+    expect(typeof result.percentileRank).toBe('number');
     expect(result.top5fastest).toEqual([FAST_ROW]);
-    expect(result.top5slowest).toEqual([SLOW_ROW]);
-    expect(result.nearest10).toEqual([NEAR_ROW]);
+    expect(result.nearest5).toEqual([NEAR_ROW]);
   });
 
-  test('alltime — duration is $3 in percentile_rank and nearest queries', async () => {
+  test('interpolates percentileRank from stored percentiles', async () => {
+    // DURATION=300 == p55=300 in PCT_ROW → rank should be exactly 55
     mockCompare();
-    await getRouteCompare(mockPool, START, END, DURATION, null, 'alltime');
-    const calls = mockPool.query.mock.calls;
-
-    // pctRank query (index 1) and nearest query (index 4) get duration appended
-    expect(calls[1][1]).toEqual([START, END, DURATION]);
-    expect(calls[4][1]).toEqual([START, END, DURATION]);
-    // count, fastest, slowest get only base params
-    expect(calls[0][1]).toEqual([START, END]);
-    expect(calls[2][1]).toEqual([START, END]);
-    expect(calls[3][1]).toEqual([START, END]);
+    const result = await getRouteCompare(mockPool, START, END, DURATION);
+    expect(result.percentileRank).toBe(55);
   });
 
-  test('year — duration is $4 when dateRef occupies $3', async () => {
-    mockCompare();
-    await getRouteCompare(mockPool, START, END, DURATION, DATE_REF, 'year');
-    const calls = mockPool.query.mock.calls;
+  test('duration faster than min_seconds → percentileRank 0', async () => {
+    mockCompare({ ...COMPARE_STATS, min_seconds: 500 }); // duration=300 < min=500
+    const result = await getRouteCompare(mockPool, START, END, DURATION);
+    expect(result.percentileRank).toBe(0);
+  });
 
-    expect(calls[0][1]).toEqual([START, END, DATE_REF]);          // count — base only
-    expect(calls[1][1]).toEqual([START, END, DATE_REF, DURATION]); // pctRank
-    expect(calls[4][1]).toEqual([START, END, DATE_REF, DURATION]); // nearest
-    expect(calls[1][0]).toContain('$4');                           // duration at $4
+  test('nearest query receives duration as $3', async () => {
+    mockCompare();
+    await getRouteCompare(mockPool, START, END, DURATION);
+    const calls = mockPool.query.mock.calls;
+    // nearest query (index 2) should have duration as third param
+    expect(calls[2][1]).toEqual([START, END, DURATION]);
+    expect(calls[2][0]).toContain('ABS(duration_seconds');
   });
 
   test('zero rows — percentileRank is 0, arrays are empty', async () => {
     mockPool.query
-      .mockResolvedValueOnce({ rows: [{ count: 0 }] })
-      .mockResolvedValueOnce({ rows: [{ percentile_rank: null }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [] })  // route_stats — no match
+      .mockResolvedValueOnce({ rows: [] })  // fastest
+      .mockResolvedValueOnce({ rows: [] }); // nearest
 
-    const result = await getRouteCompare(mockPool, START, END, DURATION, null, 'alltime');
+    const result = await getRouteCompare(mockPool, START, END, DURATION);
 
     expect(result.count).toBe(0);
     expect(result.percentileRank).toBe(0);
-    expect(result.nearest10).toEqual([]);
-  });
-
-  test('throws on invalid timeframe', async () => {
-    await expect(getRouteCompare(mockPool, START, END, DURATION, null, 'bad')).rejects.toThrow('Invalid timeframe');
+    expect(result.nearest5).toEqual([]);
   });
 });
 
@@ -261,7 +213,6 @@ describe('getExploreRoutes', () => {
     expect(sql).toContain('ep.p50 >= $1');
     expect(sql).toContain('ep.start_station_id != ep.end_station_id');
     expect(sql).toContain('ep.distance_meters');
-    // WHERE clause should have no borough/neighborhood conditions when unfiltered
     const whereClause = sql.slice(sql.indexOf('WHERE'));
     expect(whereClause).not.toContain('borough');
     expect(whereClause).not.toContain('neighborhood');
