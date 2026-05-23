@@ -57,7 +57,7 @@
         transform: translateY(100%);
         transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
         min-height: 100px;
-        max-height: 65vh;
+        max-height: 50vh;
         overflow: hidden;
         display: flex;
         flex-direction: column;
@@ -1422,11 +1422,12 @@
           ).addTo(map);
 
           const pad = 50, desktop = window.innerWidth >= 768;
+          const drawerH = desktop ? 0 : panel.offsetHeight;
           map.flyToBounds(
             L.latLngBounds([[+s.lat, +s.lng], [+e.lat, +e.lng]]),
             {
               paddingTopLeft: [pad, 60],
-              paddingBottomRight: desktop ? [360 + pad, pad] : [pad, Math.round(window.innerHeight * 0.38)],
+              paddingBottomRight: desktop ? [360 + pad, pad] : [pad, drawerH + 24],
               maxZoom: 15,
               duration: 2.5,
             },
