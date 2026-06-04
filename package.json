@@ -21,6 +21,7 @@
     "csv-parse": "^6.2.1",
     "hono": "^4.12.19",
     "pg": "^8.20.0",
+    "posthog-node": "^5.36.1",
     "unzipper": "^0.12.3"
   },
   "devDependencies": {

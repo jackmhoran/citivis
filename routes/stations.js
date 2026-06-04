@@ -1,6 +1,13 @@
 import { Hono } from 'hono';
 import pool from '../lib/db.js';
 import { getAllStations, getStationDestinations, getClosestStations, getRandomStation, getRouteStats, getRouteCompare, getPopularRoutes, getAllRouteRides, getExploreRoutes, getExploreMeta } from '../queries/stations.js';
+import posthog from '../lib/posthog.js';
+
+function getIp(c) {
+  return c.req.header('cf-connecting-ip')
+    ?? c.req.header('x-forwarded-for')?.split(',')[0].trim()
+    ?? 'unknown';
+}
 
 const router = new Hono();
 
@@ -16,6 +23,11 @@ router.get('/nearest', async (c) => {
     return c.json({ error: 'lat (-90–90) and lng (-180–180) are required' }, 400);
   }
   const stations = await getClosestStations(pool, lat, lng);
+  posthog.capture({
+    distinctId: getIp(c),
+    event: 'nearest_stations_searched',
+    properties: { lat, lng, result_count: stations.length, $process_person_profile: false },
+  });
   return c.json({ stations });
 });
 
@@ -35,6 +47,11 @@ router.get('/popular', async (c) => {
     }
   }
   const routes = await getPopularRoutes(pool, minFastest);
+  posthog.capture({
+    distinctId: getIp(c),
+    event: 'popular_routes_viewed',
+    properties: { min_fastest: minFastest, result_count: routes.length, $process_person_profile: false },
+  });
   return c.json({ routes });
 });
 
@@ -54,12 +71,22 @@ router.get('/explore', async (c) => {
   if (!['popular', 'speed'].includes(sort))
     return c.json({ error: 'sort must be popular or speed' }, 400);
   const routes = await getExploreRoutes(pool, { borough, neighborhood, minMedian, sort });
+  posthog.capture({
+    distinctId: getIp(c),
+    event: 'route_explored',
+    properties: { borough, neighborhood, min_median: minMedian, sort, result_count: routes.length, $process_person_profile: false },
+  });
   return c.json({ routes });
 });
 
 router.get('/:id/destinations', async (c) => {
   const { id } = c.req.param();
   const destinations = await getStationDestinations(pool, id);
+  posthog.capture({
+    distinctId: getIp(c),
+    event: 'station_destinations_viewed',
+    properties: { station_id: id, result_count: destinations.length, $process_person_profile: false },
+  });
   return c.json({ destinations });
 });
 
@@ -72,6 +99,17 @@ router.get('/:startId/:endId/rides', async (c) => {
 router.get('/:startId/:endId/stats', async (c) => {
   const { startId, endId } = c.req.param();
   const result = await getRouteStats(pool, startId, endId);
+  posthog.capture({
+    distinctId: getIp(c),
+    event: 'route_stats_viewed',
+    properties: {
+      start_station_id: startId,
+      end_station_id: endId,
+      trip_count: result.count ?? 0,
+      distance_meters: result.distanceMeters ?? null,
+      $process_person_profile: false,
+    },
+  });
   return c.json(result);
 });
 
@@ -86,6 +124,18 @@ router.get('/:startId/:endId/compare', async (c) => {
   }
 
   const result = await getRouteCompare(pool, startId, endId, duration);
+  posthog.capture({
+    distinctId: getIp(c),
+    event: 'route_compared',
+    properties: {
+      start_station_id: startId,
+      end_station_id: endId,
+      duration_seconds: duration,
+      percentile_rank: result.percentileRank,
+      trip_count: result.count ?? 0,
+      $process_person_profile: false,
+    },
+  });
   return c.json(result);
 });
 
