@@ -8,12 +8,18 @@ import { Writable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { maintainRouteStats } from '../lib/maintain-route-stats.js';
 
-const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://localhost/citivis';
+const rawUrl = process.env.DATABASE_URL || 'postgresql://localhost/citivis';
+const connectionString = rawUrl.replace(/([?&])sslmode=[^&?#]*/g, '$1').replace(/[?&]$/, '');
 const S3_BASE = 'https://s3.amazonaws.com/tripdata';
 const START_PERIOD = '2020-01';
-const BATCH_SIZE = 500;
+const BATCH_SIZE = 5000;
 
-const pool = new Pool({ connectionString: DATABASE_URL });
+const pool = new Pool({
+  connectionString,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
+});
 
 // ── S3 key ↔ period mapping ───────────────────────────────────────────────────
 
@@ -186,16 +192,23 @@ function parseRow(row) {
 
 // ── Batch insert ──────────────────────────────────────────────────────────────
 
-async function upsertStations(client, stationMap) {
-  for (const s of stationMap.values()) {
-    await client.query(
-      `INSERT INTO stations (id, name, lat, lng) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING`,
-      [s.id, s.name, parseFloat(s.lat) || null, parseFloat(s.lng) || null]
-    );
+async function upsertStations(stationMap) {
+  if (!stationMap.size) return;
+  const stations = [...stationMap.values()];
+  const placeholders = [];
+  const params = [];
+  let i = 1;
+  for (const s of stations) {
+    placeholders.push(`($${i++},$${i++},$${i++},$${i++})`);
+    params.push(s.id, s.name, parseFloat(s.lat) || null, parseFloat(s.lng) || null);
   }
+  await pool.query(
+    `INSERT INTO stations (id, name, lat, lng) VALUES ${placeholders.join(',')} ON CONFLICT (id) DO NOTHING`,
+    params
+  );
 }
 
-async function flushBatch(client, batch, affectedPairs) {
+async function flushBatch(batch, affectedPairs) {
   const stationMap = new Map();
   for (const r of batch) {
     if (r.start_station_id && !stationMap.has(r.start_station_id)) {
@@ -211,7 +224,7 @@ async function flushBatch(client, batch, affectedPairs) {
       });
     }
   }
-  await upsertStations(client, stationMap);
+  await upsertStations(stationMap);
 
   const valid = batch.filter(r =>
     r.start_station_id &&
@@ -230,14 +243,14 @@ async function flushBatch(client, batch, affectedPairs) {
     params.push(r.ride_id, r.started_at, r.duration_seconds,
                 r.start_station_id, r.end_station_id, r.is_member ?? null);
   }
-  await client.query(
+  await pool.query(
     `INSERT INTO trips (ride_id, started_at, duration_seconds, start_station_id, end_station_id, is_member)
      VALUES ${placeholders.join(',')} ON CONFLICT (ride_id) DO NOTHING`,
     params
   );
 }
 
-async function processCsvStream(csvStream, client, tripCountRef, affectedPairs) {
+async function processCsvStream(csvStream, tripCountRef, affectedPairs) {
   let batch = [];
   await new Promise((resolve, reject) => {
     const writer = new Writable({
@@ -248,7 +261,7 @@ async function processCsvStream(csvStream, client, tripCountRef, affectedPairs) 
         if (batch.length < BATCH_SIZE) return cb();
 
         const toFlush = batch.splice(0, BATCH_SIZE);
-        flushBatch(client, toFlush, affectedPairs)
+        flushBatch(toFlush, affectedPairs)
           .then(() => {
             tripCountRef.count += toFlush.length;
             if (tripCountRef.count % 50000 === 0)
@@ -259,7 +272,7 @@ async function processCsvStream(csvStream, client, tripCountRef, affectedPairs) 
       },
       final(cb) {
         if (batch.length === 0) return cb();
-        flushBatch(client, batch, affectedPairs)
+        flushBatch(batch, affectedPairs)
           .then(() => { tripCountRef.count += batch.length; batch = []; cb(); })
           .catch(cb);
       },
@@ -285,56 +298,45 @@ async function ingestAnnualZip(key) {
   console.log(`\nFetching ${url} (annual)…`);
 
   const httpStream = await fetchStream(url);
-  const client = await pool.connect();
   const tripCountRef = { count: 0 };
   const affectedPairs = new Set();
 
-  try {
-    await client.query('BEGIN');
-
-    const zip = httpStream.pipe(unzipper.Parse({ forceStream: true }));
-    for await (const entry of zip) {
-      const name = entry.path.split('/').pop();
-      // Skip macOS metadata artifacts (._* resource forks, .DS_Store)
-      if (name.startsWith('._') || name === '.DS_Store' || name === '._.DS_Store') {
-        entry.autodrain(); continue;
-      }
-      if (entry.path.match(/\.csv$/i)) {
-        console.log(`  Processing ${entry.path}…`);
-        const csvStream = entry.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
-        await processCsvStream(csvStream, client, tripCountRef, affectedPairs);
-      } else if (entry.path.match(/\.zip$/i)) {
-        // Annual NYC zips contain nested monthly zips
-        const innerZip = entry.pipe(unzipper.Parse({ forceStream: true }));
-        for await (const inner of innerZip) {
-          if (!inner.path.match(/\.csv$/i)) { inner.autodrain(); continue; }
-          console.log(`  Processing ${inner.path}…`);
-          const csvStream = inner.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
-          await processCsvStream(csvStream, client, tripCountRef, affectedPairs);
-        }
-      } else {
-        entry.autodrain();
-      }
+  const zip = httpStream.pipe(unzipper.Parse({ forceStream: true }));
+  for await (const entry of zip) {
+    const name = entry.path.split('/').pop();
+    // Skip macOS metadata artifacts (._* resource forks, .DS_Store)
+    if (name.startsWith('._') || name === '.DS_Store' || name === '._.DS_Store') {
+      entry.autodrain(); continue;
     }
-
-    for (let m = 1; m <= 12; m++) {
-      const period = `${year}-${String(m).padStart(2, '0')}`;
-      await client.query(
-        `INSERT INTO ingestion_log (month, trip_count) VALUES ($1, $2) ON CONFLICT (month) DO NOTHING`,
-        [period, 0]
-      );
+    if (entry.path.match(/\.csv$/i)) {
+      console.log(`  Processing ${entry.path}…`);
+      const csvStream = entry.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
+      await processCsvStream(csvStream, tripCountRef, affectedPairs);
+    } else if (entry.path.match(/\.zip$/i)) {
+      // Annual NYC zips contain nested monthly zips
+      const innerZip = entry.pipe(unzipper.Parse({ forceStream: true }));
+      for await (const inner of innerZip) {
+        if (!inner.path.match(/\.csv$/i)) { inner.autodrain(); continue; }
+        console.log(`  Processing ${inner.path}…`);
+        const csvStream = inner.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
+        await processCsvStream(csvStream, tripCountRef, affectedPairs);
+      }
+    } else {
+      entry.autodrain();
     }
-
-    await client.query('COMMIT');
-    console.log(`\n${year}: ingested ${tripCountRef.count} classic bike trips.`);
-    console.log(`Updating route_stats and trimming trips for ${affectedPairs.size} affected pairs…`);
-    await maintainRouteStats(pool, affectedPairs);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
   }
+
+  for (let m = 1; m <= 12; m++) {
+    const period = `${year}-${String(m).padStart(2, '0')}`;
+    await pool.query(
+      `INSERT INTO ingestion_log (month, trip_count) VALUES ($1, $2) ON CONFLICT (month) DO NOTHING`,
+      [period, 0]
+    );
+  }
+
+  console.log(`\n${year}: ingested ${tripCountRef.count} classic bike trips.`);
+  console.log(`Updating route_stats and trimming trips for ${affectedPairs.size} affected pairs…`);
+  await maintainRouteStats(pool, affectedPairs);
 }
 
 async function ingestPeriod(period, key = null) {
@@ -353,35 +355,24 @@ async function ingestPeriod(period, key = null) {
   console.log(`\nFetching ${url}…`);
   const httpStream = await fetchStream(url);
 
-  const client = await pool.connect();
   const tripCountRef = { count: 0 };
   const affectedPairs = new Set();
 
-  try {
-    await client.query('BEGIN');
-
-    const zip = httpStream.pipe(unzipper.Parse({ forceStream: true }));
-    for await (const entry of zip) {
-      if (!entry.path.match(/\.csv$/i)) { entry.autodrain(); continue; }
-      console.log(`  Processing ${entry.path}…`);
-      const csvStream = entry.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
-      await processCsvStream(csvStream, client, tripCountRef, affectedPairs);
-    }
-
-    await client.query(
-      `INSERT INTO ingestion_log (month, trip_count) VALUES ($1,$2)`,
-      [period, tripCountRef.count]
-    );
-    await client.query('COMMIT');
-    console.log(`\n${period}: ingested ${tripCountRef.count} classic bike trips.`);
-    console.log(`Updating route_stats and trimming trips for ${affectedPairs.size} affected pairs…`);
-    await maintainRouteStats(pool, affectedPairs);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
+  const zip = httpStream.pipe(unzipper.Parse({ forceStream: true }));
+  for await (const entry of zip) {
+    if (!entry.path.match(/\.csv$/i)) { entry.autodrain(); continue; }
+    console.log(`  Processing ${entry.path}…`);
+    const csvStream = entry.pipe(parse({ columns: true, skip_empty_lines: true, trim: true }));
+    await processCsvStream(csvStream, tripCountRef, affectedPairs);
   }
+
+  await pool.query(
+    `INSERT INTO ingestion_log (month, trip_count) VALUES ($1,$2)`,
+    [period, tripCountRef.count]
+  );
+  console.log(`\n${period}: ingested ${tripCountRef.count} classic bike trips.`);
+  console.log(`Updating route_stats and trimming trips for ${affectedPairs.size} affected pairs…`);
+  await maintainRouteStats(pool, affectedPairs);
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────

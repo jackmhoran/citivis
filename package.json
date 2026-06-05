@@ -11,6 +11,8 @@
     "ingest": "node scripts/ingest.js",
     "sync": "node scripts/ingest.js sync",
     "apply-distances": "node scripts/apply-station-distances.js",
+    "fetch-explore-distances": "node scripts/fetch-explore-distances.js",
+    "build-explore-pool": "node scripts/build-explore-pool.js",
     "build-route-stats": "node scripts/build-route-stats.js",
     "trim-trips": "node scripts/trim-trips.js",
     "verify": "node scripts/verify.js",
